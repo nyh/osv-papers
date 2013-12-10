@@ -27,7 +27,56 @@ abstract
 %\keywords{ACM proceedings, \LaTeX, text tagging}
 
 \section{Introduction}
-\section{Related Work}
+A fair, tick-less, simple and efficient scheduler.
+
+Introduce the concepts of per-cpu runqueue, runnable threads and sleeping
+threads.
+Tick-less scheduler needs to decide for how long to run the thread,
+and run the scheduler again whenever waking up another thread.
+
+Say that this paper only talks about picking which thread to run and for
+how long to run it - and not other things (data structures, wakeups, etc.).
+However, consider if we need some of those in this paper to make it meatier.
+Moreover, consider if we should discuss only single-cpu runqueue (as we do
+now, and should say so explicitly) or also multi-cpu, and the idea and
+implementation of load balancing thread.
+
+\section{Related work}
+Discuss existing schedulers, especially Linux and other popular systems
+and how they differ - using ticks, not being fair, how they do priority,
+not using floating point, and what they provide more (like cgroups).
+Cite previous work on fair scheduling and pick up some terminology from
+these previous work.
+
+\section{The OSv Scheduler}
+\subsection{Runtime}
+A \emph{fair} scheduler needs measure the amount of CPU time used by
+each thread, to decide which thread got the least amount of CPU
+time, and therefore deserves to run next. We call the measure of CPU time
+used by each thread its {\bf runtime}.
+
+Remembering the total runtime of each thread since it started
+is a bad idea, because it allows long-sleeping threads to dominate the
+processor when they wake up. As an example, consider two threads,
+where one has been sleeping for a whole minute, while the second has been
+running. If the first thread now wakes up, for the sake of ``fairness''
+it will be allowed to run for a whole minute until it catches up with the
+second thread's runtime -- while the second thread is forced to sleep for
+a whole minute. This is not a useful sense of fairness.
+
+Instead, we'd like our schedule to be fair only when considering \emph{recent}
+history. In the above example, the two threads which both want the CPU will
+soon converge on an equal share of CPU time, despite their unequal CPU usage
+in the distant past.
+
+\begin{equation}
+R(t_0) = \int^{t_0}_{0}\!r(t)e^{(t-t_0)/\tau}\,dt
+\end{equation}
+
+
+\section{Analysis}
+Test verifying fairness, slice length, etc., and comparing it to other
+systems such as Linux.
 
 %\bibliographystyle{abbrv}
 %\bibliography{scheduler}
