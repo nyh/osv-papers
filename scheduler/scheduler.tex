@@ -1,8 +1,12 @@
+% TODO: Check out papers:
+% https://www.kernel.org/doc/ols/2001/elss.pdf
+% http://static.usenix.org/events/osdi00/full_papers/chandra/chandra_html/
+% http://www-users.cs.umn.edu/~chandra/papers/rtas01/paper.pdf
 \documentclass{sig-alternate}
 
 \begin{document}
 \conferenceinfo{Conference name}{Conference date}
-\title{The OSv Thread Scheduler}
+\title{The OSv Scheduler}
 \numberofauthors{2}
 \author{
 \alignauthor
@@ -27,19 +31,29 @@ abstract
 %\keywords{ACM proceedings, \LaTeX, text tagging}
 
 \section{Introduction}
-A fair, tick-less, simple and efficient scheduler.
+Talk about the OSv scheduler, why it is different
+
+Talk about our contributions:
+
+1.  First (?) to calculate decaying runtime accurately from first princples,
+and show this can be done efficiently (without tracking the runtime of all
+threads on each reschedule).
+
+2. First (but probably not?) to have a lock-free SMP scheduler.
+
+3. Something from the analysis - superior fairness? etc.
 
 Introduce the concepts of per-cpu runqueue, runnable threads and sleeping
 threads.
 Tick-less scheduler needs to decide for how long to run the thread,
 and run the scheduler again whenever waking up another thread.
 
-Say that this paper only talks about picking which thread to run and for
-how long to run it - and not other things (data structures, wakeups, etc.).
-However, consider if we need some of those in this paper to make it meatier.
-Moreover, consider if we should discuss only single-cpu runqueue (as we do
-now, and should say so explicitly) or also multi-cpu, and the idea and
-implementation of load balancing thread.
+%Say that this paper only talks about picking which thread to run and for
+%how long to run it - and not other things (data structures, wakeups, etc.).
+%However, consider if we need some of those in this paper to make it meatier.
+%Moreover, consider if we should discuss only single-cpu runqueue (as we do
+%now, and should say so explicitly) or also multi-cpu, and the idea and
+%implementation of load balancing thread.
 
 \section{Related work}
 Discuss existing schedulers, especially Linux and other popular systems
@@ -48,7 +62,169 @@ not using floating point, and what they provide more (like cgroups).
 Cite previous work on fair scheduling and pick up some terminology from
 these previous work.
 
+Discuss Linux's new CFS as the leader of a new direction
+people.redhat.com/mingo/cfs-scheduler/sched-design-CFS.txt
+which also uses nanoseconds, not ticks, and a priority queue (rb-tree)
+But it sees how much unfair advantage each thread gots, not how much it ran,
+so I think the intermittenet-thread test (half running half sleeping) will
+not be fair whereas for us - because we consider just runtime, not "wanting
+to run" - it will be fair.
+
 \section{The OSv Scheduler}
+\label{sec:sched}
+The guiding principles of OS\textsuperscript{v}'s thread scheduler are that it should be
+\emph{lock-free}, \emph{preemptive}, \emph{tick-less}, \emph{fair},
+\emph{scalable} and \emph{efficient}:
+
+\paragraph{Lock-free}
+As explained in Section~\ref{sec:lockfree}, OS\textsuperscript{v}'s scheduler should not use spin-locks
+and it obviously cannot use a sleeping mutex.
+
+The scheduler keeps a separate \emph{run queue} on each CPU, listing the
+\emph{runnable} threads on this CPU. Sleeping
+threads are not listed on any run queue. The scheduler runs on this
+CPU when the running thread asks for a reschedule, or when a timer expiration 
+forces preemption. At that point, the scheduler chooses the most appropriate
+thread to run next to from the threads
+on this CPU's run-queue, according to its fairness criteria.
+Because each CPU has its own separate run-queue, this part of the scheduler
+needs no locking.
+
+The separate run queues can obviously lead to a situation where one CPU's
+queue has more runnable threads than another CPU's, hurting the scheduler's
+overall fairness. We solve this by running a \emph{load balancer} thread on each
+CPU. This thread wakes up once in a while (10 times a second), and checks
+if some other CPU's run queue is shorter than this CPUs. If it is, it picks
+one thread from this CPU's run queue, and wakes up this thread on the
+remote CPU.
+
+Waking a thread on a remote CPU requires a more elaborate lock-free algorithm:
+For each of the $N$ CPUs, we keep $N$ lock-free queues of \emph{incoming
+wakeups}, for a total of $N^2$ queues. We also keep a
+bitmask of nonempty queues for each CPU. When CPU $s$ wants to wake a thread
+on CPU $d$, it adds this thread to the queue $s,d$, atomically turns on bit $s$ in CPU $d$'s bitmask
+and sends an inter-processor interrupt (IPI) to CPU $d$.
+The interrupt leads CPU $d$ to perform a reschedule, which begins by looking
+for incoming wakeups. The bitmask tells the scheduler which of the incoming queues
+it needs to inspect.
+
+\paragraph{Preemptive} OS\textsuperscript{v} fully supports preemptive multi-tasking:
+While threads can voluntarily cause a reschedule (by waiting, yielding, or 
+waking up another thread), it can also happen at any time, preempted
+by an interrupt such as a timer or the wakeup IPI mentioned above.
+All threads are preemptable and as with the rest of the system, there is no difference between application 
+and kernel threads. A thread can temporarily avoid being preempted by
+incrementing a per-thread preempt-disable counter. This feature can
+be useful in a number of cases including, for example, maintaining per-CPU
+variables and RCU~\cite{RCU} locks. An interrupt while the running thread 
+has preemption disabled will not cause a reschedule, but when the thread
+finally re-enables preemption, a reschedule will take place.
+
+
+\paragraph{Tick-less}
+%As explained above, timer interrupts can cause rescheduling. However,
+%OS\textsuperscript{v} does not employ a periodic timer interrupt.
+Most classic kernels, and even many modern kernels, employ a periodic timer
+interrupt, also known as a \emph{tick}. The tick causes a reschedule to happen periodically,
+for example, 100 times each second. Such kernels often account the amount of time that
+each thread ran in whole ticks, and use these counts to decide which thread
+to schedule at each tick.
+
+Ticks are convenient, but also have various disadvantages. Most importantly,
+excessive timer interrupts waste CPU time. This is especially true on
+on virtual machines where interrupts are significantly slower than on
+physical machines, as they involve exits to the hypervisor.
+
+Because of the disadvantages of ticks, OS\textsuperscript{v} implements a tickless design. Using
+a high resolution clock, the scheduler
+accounts to each thread the exact time it consumed, instead of approximating it with ticks.
+Some timer interrupts are still
+used: Whenever the fair scheduling algorithm
+decides to run one thread, it also calculates when it will want to switch
+to the next thread, and sets a timer for that period. The scheduler employs
+hysteresis to avoid switching too frequently between two busy threads.
+With the default hysteresis setting of 2ms, two busy threads with equal
+priority will alternate 4ms time slices, and the scheduler will never
+cause more than 500 timer interrupts each second. This number will
+be much lower when there aren't several threads constantly competing for CPU.
+
+\paragraph{Fair}
+\label{par:fair}
+On each reschedule, the scheduler must decide which of the CPU's runnable
+threads should run next, and for how long. A fair scheduler
+should account the amount of \emph{run time} that each thread got, and
+strive to either equalize it or achieve a desired ratio if the threads have
+different priorities. However, using the total run-time of the threads
+will quickly lead to imbalances. A thread that was out of the CPU for 10 seconds
+becomes runnable, will come back to monopolize the CPU
+for 10 whole seconds seeking to achieve fairness. Instead, we want to
+equalize the amount of run-time that runnable threads got in recent
+history, and forget about the distant past.
+
+OS\textsuperscript{v}'s scheduler does not use heuristics
+to approximate that recent-runtime. Instead, we accurately calculate
+the exponentially-decaying moving average of each thread's recent
+run time. The scheduler will choose to run next
+the runnable thread with the lowest moving-average runtime, and calculate
+exactly how much time this thread should be allowed to run - until its
+runtime will surpass that of the runner-up thread.
+
+Our moving-average runtime is a floating-point number. It is interesting
+to mention that while some kernels forbid floating-point use inside the
+kernel, OS\textsuperscript{v} fully allows it. As a matter of fact, it has no choice but to allow floating
+point in the kernel due to the lack of a clear boundary between
+the kernel and the application.
+
+The biggest stumbling block to implementing moving-average runtime as
+described above is its scalability: It would be impractical to update the
+moving-average runtimes of \emph{all} threads on each scheduler invocation.
+
+But we can to show that this is not actually necessary:
+We can achieve the same goal with just updating the runtime of the
+single running thread. It is beyond the scope of this
+article to derive the formulas used in OS\textsuperscript{v}'s scheduler to maintain the
+moving-average runtime, or to calculate how much time we should allow
+a thread to run until its moving-average runtime overtakes that of the
+runner-up thread.
+
+
+\paragraph{Scalable}
+OS\textsuperscript{v}'s scheduler has $O(\lg N)$ complexity in the number of runnable
+threads on each CPU: The run queue is kept sorted by moving-average
+runtime, and as explained, each reschedule updates the
+runtime of just one thread. The scheduler is totally unaware of threads
+which are not runnable (e.g., waiting for a timer or a mutex), so there
+is no performance cost in having many utility threads lying around and rarely running. OS\textsuperscript{v}
+indeed has many of these utility threads, such as the load-balancer and interrupt-handling threads.
+
+\paragraph{Efficient}
+Beyond the scheduler's scalability, OS\textsuperscript{v} employs additional techniques to
+make the scheduler and context switches more efficient.
+
+Some of these techniques include:
+
+\begin{itemize}
+  \item OS\textsuperscript{v}'s single address space means that we do not need to switch page tables
+or flush the TLB on context switches. This makes context switches significantly cheaper
+than those on traditional multi-process operating systems.
+
+\item Saving the floating-point unit (FPU) registers on every context
+switch is also costly. We make use of the fact that most reschedules are
+voluntary, caused by the running thread calling a function such as
+{\tt mutex\_wait()} or {\tt wake()}. The x86\_64 ABI guarantees that the FPU
+registers are caller-saved. So for voluntary context switches, we can skip saving the FPU state.
+\end{itemize}
+
+As explained above, waking a sleeping thread on a different CPU requires
+an IPI. These are expensive, and even more so on virtual machines, where
+both sending and receiving interrupts cause exits to the hypervisor. As an optimization, idle
+CPUs spend some time before halting in polling state, where they ask not to
+be sent these IPIs, and instead poll the wakeup bitmask. This optimization
+can almost eliminate the expensive IPIs in the case where two
+threads on two CPUs wait for one another in lockstep.
+
+%avoiding setting timers unnecessrily (slow) or getting them..
+\section{Fairness on a single run-queue}
 \subsection{Runtime}
 A \emph{fair} scheduler needs measure the amount of CPU time used by
 each thread, to decide which thread got the least amount of CPU
@@ -72,12 +248,17 @@ in the distant past.
 \begin{equation}
 R(t_0) = \int^{t_0}_{0}\!r(t)e^{(t-t_0)/\tau}\,dt
 \end{equation}
+\section{Global fairness}
+Mention that runtime has identical meaning on different CPUs.
+
+load balancing.
 
 
 \section{Analysis}
 Test verifying fairness, slice length, etc., and comparing it to other
-systems such as Linux.
+systems such as Linux. Also micro-benchmarks?
 
-%\bibliographystyle{abbrv}
-%\bibliography{scheduler}
+
+\bibliographystyle{abbrv}
+\bibliography{scheduler}
 \end{document}
