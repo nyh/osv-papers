@@ -6,7 +6,7 @@
 
 \begin{document}
 \conferenceinfo{Conference name}{Conference date}
-\title{The OSv Scheduler}
+\title{Fair Thread Scheduler with Exponential Moving Average}
 \numberofauthors{2}
 \author{
 \alignauthor
@@ -31,6 +31,35 @@ abstract
 %\keywords{ACM proceedings, \LaTeX, text tagging}
 
 \section{Introduction}
+Say that in the old days, the process and thread schedulers in operating
+systems used time slices, but as efficient high-resolution clocks and
+timers were introduced, it became possible to exactly track the CPU usage
+of individual threads at nanosecond resolution.
+
+Say what CFS-like designs do, how they track the CPU usage of each thread
+and at each scheduling point let the thread with the lowest runtime run.
+However, say that now we have the problem of long-sleeping threads, and
+what heuristics have been used to "fix" runtime of waking threads.
+See if there is a name for this class of schedulers we can use.
+
+Say that in this paper we present the scheduler of the OSv [1] operating
+system. A feature distinugishing this scheduler from earlier attempts like
+CFS, is that we replace the "arbitrary" wakeup runtime fixes by a
+rigourous mathematical treatment of runtime's \emph{decay} over time,
+making it easier to reason about the correctness and fairness of this
+scheduler, and as we shall see, provide better \emph{sleeper fairness}
+guaranetees.
+
+The OSv kernel, unlike most extant kernels, allows floating-point
+calculations in the kernel. This capability is put to use by our
+scheduler, because we could directly use the mathematical formulas
+derived in this paper in our code. However, the same formulas can
+also be used in kernels that only support integer calculation by
+emulating the floating point operations using integers.
+
+
+
+old text:-------------------------
 Talk about the OSv scheduler, why it is different
 
 Talk about our contributions:
@@ -71,6 +100,12 @@ not be fair whereas for us - because we consider just runtime, not "wanting
 to run" - it will be fair.
 
 \section{The OSv Scheduler}
+TODO: We don't need this section... Mention these things and refer to the
+OSv paper, but the focus of this paper should be just the scheduling
+algorithm - not the rest of the details. But we need to mention these things
+(like scalable, lock-free) to explain why we have a separate scheduler
+per core, and a load balancer on top of it.
+
 \label{sec:sched}
 The guiding principles of OS\textsuperscript{v}'s thread scheduler are that it should be
 \emph{lock-free}, \emph{preemptive}, \emph{tick-less}, \emph{fair},
